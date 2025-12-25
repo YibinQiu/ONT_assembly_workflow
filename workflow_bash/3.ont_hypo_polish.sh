@@ -146,21 +146,6 @@ if ! command -v hypo &> /dev/null; then
     exit 1
 fi
 
-# Check for hypo-assembler scripts
-if [[ ! -f "$HYPO_ASSEMBLER_DIR/run_all/scan_misjoin.py" ]]; then
-    echo "Error: scan_misjoin.py not found in $HYPO_ASSEMBLER_DIR/run_all/"
-    exit 1
-fi
-
-if [[ ! -f "$HYPO_ASSEMBLER_DIR/run_all/run_overlap.sh" ]]; then
-    echo "Error: run_overlap.sh not found in $HYPO_ASSEMBLER_DIR/run_all/"
-    exit 1
-fi
-
-if [[ ! -f "$HYPO_ASSEMBLER_DIR/run_all/run_scaffold.sh" ]]; then
-    echo "Error: run_scaffold.sh not found in $HYPO_ASSEMBLER_DIR/run_all/"
-    exit 1
-fi
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -221,85 +206,26 @@ else
     echo "Long read alignment BAM file already exists, skipping mapping"
 fi
 
-# STEP 2: Getting solid kmers
-echo "STEP 2: Getting solid kmers"
-SUK_BV="$TEMP_DIR/SUK_k${KMER_LENGTH}.bv"
-if [[ ! -f "$SUK_BV" ]]; then
-    echo "Getting solid kmers"
-    suk -k "$KMER_LENGTH" -i "@$TEMP_DIR/shorts.txt" -t "$THREADS" -m "$KMCMEM" -e -w "$TEMP_DIR/suk_kmc" -o "$TEMP_DIR/SUK" 2>&1 | tee "$TEMP_DIR/suk.log"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to get solid kmers"
-        exit 1
-    fi
-else
-    echo "Solid kmer file already exists, skipping kmer detection"
-fi
 
-# STEP 3: Scanning misjoin
-echo "STEP 3: Scanning misjoin"
-MISJOIN_FA="$TEMP_DIR/misjoin.fa"
-if [[ ! -f "$MISJOIN_FA" ]]; then
-    echo "Scanning misjoin"
-    python "$HYPO_ASSEMBLER_DIR/run_all/scan_misjoin.py" "$DRAFT_ASSEMBLY" "$LONG_BAM" "$MISJOIN_FA" 2>&1 | tee -a "$TEMP_DIR/misjoin.log"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to scan misjoin"
-        exit 1
-    fi
-else
-    echo "Misjoin file already exists, skipping misjoin scanning"
-fi
-
-# STEP 4: Finding overlaps
-echo "STEP 4: Finding overlaps"
-OVERLAP_FA="$TEMP_DIR/overlap.fa"
-if [[ ! -f "$OVERLAP_FA" ]]; then
-    echo "Finding overlaps"
-    sh "$HYPO_ASSEMBLER_DIR/run_all/run_overlap.sh" -k "$SUK_BV" -i "$MISJOIN_FA" -l "$LONG_READS" -t "$THREADS" -o "$TEMP_DIR/overlap" -T "$TEMP_DIR/overlap_temp" 2>&1 | tee -a "$TEMP_DIR/overlap.log"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to find overlaps"
-        exit 1
-    fi
-else
-    echo "Overlap file already exists, skipping overlap finding"
-fi
-
-# STEP 5: Realignment for polishing
-echo "STEP 5: Realignment for polishing"
-OVERLAP_LONG_BAM="$TEMP_DIR/overlap_long.bam"
-if [[ ! -f "$OVERLAP_LONG_BAM" ]]; then
-    echo "Realignment for polishing (long reads)"
-    minimap2 -I 64G -ax map-ont -t "$THREADS" "$OVERLAP_FA" "$LONG_READS" | \
+# STEP 2: Mapping short reads to draft
+echo "STEP 2: Mapping short reads to draft"
+SHORT_BAM="$TEMP_DIR/short_align.bam"
+if [[ ! -f "$SHORT_BAM" ]]; then
+    echo "Mapping short reads to draft"
+    minimap2 -I 64G -ax sr -t "$THREADS" "$DRAFT_ASSEMBLY" "$SHORT_READS_1" "$SHORT_READS_2" | \
         samtools view -bS | \
-        samtools sort -@ "$SORT_THREADS" -m "$SORT_MEM" -o "$OVERLAP_LONG_BAM"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to realign long reads for polishing"
-        exit 1
-    fi
-else
-    echo "Overlap long read alignment already exists, skipping realignment"
-fi
-
-OVERLAP_SHORT_BAM="$TEMP_DIR/overlap_short.bam"
-if [[ ! -f "$OVERLAP_SHORT_BAM" ]]; then
-    echo "Realignment for polishing (short reads)"
-    minimap2 -I 64G -ax sr -t "$THREADS" "$OVERLAP_FA" "$SHORT_READS_1" "$SHORT_READS_2" | \
-        samtools view -bS | \
-        samtools sort -@ "$SORT_THREADS" -m "$SORT_MEM" -o "$OVERLAP_SHORT_BAM"
+        samtools sort -@ "$SORT_THREADS" -m "$SORT_MEM" -o "$SHORT_BAM"
     
     if [[ $? -ne 0 ]]; then
         echo "Error: Failed to realign short reads for polishing"
         exit 1
     fi
 else
-    echo "Overlap short read alignment already exists, skipping realignment"
+    echo "Short read alignment already exists, skipping realignment"
 fi
 
-# STEP 6: Polishing
-echo "STEP 6: Polishing"
+# STEP 3: Polishing
+echo "STEP 3: Polishing"
 POLISHED_1_FA="$TEMP_DIR/polished_1.fa"
 if [[ ! -f "$POLISHED_1_FA" ]]; then
     echo "Polishing with parameters:"
@@ -307,51 +233,28 @@ if [[ ! -f "$POLISHED_1_FA" ]]; then
     echo "  Short-read coverage: $SHORT_READ_COVERAGE"
     echo "  Batch number: $HYPO_BATCH_NUMBER"
     
-    hypo -d "$OVERLAP_FA" -s "$GENOME_SIZE" -B "$OVERLAP_LONG_BAM" -C "$LONG_READ_COVERAGE" -b "$OVERLAP_SHORT_BAM" -r "@$TEMP_DIR/shorts.txt" -c "$SHORT_READ_COVERAGE" -L "$KMCMEM" -t "$THREADS" -o "$TEMP_DIR/polished" -p "$HYPO_BATCH_NUMBER" 2>&1 | tee "$TEMP_DIR/polish.log"
+    hypo -d "$DRAFT_ASSEMBLY" -s "$GENOME_SIZE" -B "$LONG_BAM" -C "$LONG_READ_COVERAGE" -b "$SHORT_BAM" -r "@$TEMP_DIR/shorts.txt" -c "$SHORT_READ_COVERAGE" -L "$KMCMEM" -t "$THREADS" -o "$TEMP_DIR/polished" -p "$HYPO_BATCH_NUMBER" 2>&1 | tee "$TEMP_DIR/polish.log"
     
     if [[ $? -ne 0 ]]; then
         echo "Error: Failed to polish assembly"
         exit 1
     fi
+    # Copy final polished files to output directory
+    cp "$TEMP_DIR/polished_1.fa" "$OUTPUT_DIR/polished_1.fa"
+    cp "$TEMP_DIR/polished_2.fa" "$OUTPUT_DIR/polished_2.fa"
+    echo "Final polished files copied to:"
+    echo "  $OUTPUT_DIR/polished_1.fa"
+    echo "  $OUTPUT_DIR/polished_2.fa"
 else
     echo "Polished assembly already exists, skipping polishing"
 fi
 
-# STEP 7: Scaffolding
-echo "STEP 7: Scaffolding"
-SCAFFOLD_1_FA="$TEMP_DIR/scaffold_1.fa"
-if [[ ! -f "$SCAFFOLD_1_FA" ]]; then
-    echo "Scaffolding"
-    sh "$HYPO_ASSEMBLER_DIR/run_all/run_scaffold.sh" -k "$SUK_BV" -i "$TEMP_DIR/polished_1.fa" -I "$TEMP_DIR/polished_2.fa" -l "$LONG_READS" -t "$THREADS" -o "$TEMP_DIR/scaffold" -T "$TEMP_DIR" 2>&1 | tee "$TEMP_DIR/scaffold.log"
-    
-    if [[ $? -ne 0 ]]; then
-        echo "Error: Failed to scaffold assembly"
-        exit 1
-    fi
-    
-    # Copy final scaffold files to output directory
-    cp "$TEMP_DIR/scaffold_1.fa" "$OUTPUT_DIR/scaffold_1.fa"
-    cp "$TEMP_DIR/scaffold_2.fa" "$OUTPUT_DIR/scaffold_2.fa"
-    echo "Final scaffold files copied to:"
-    echo "  $OUTPUT_DIR/scaffold_1.fa"
-    echo "  $OUTPUT_DIR/scaffold_2.fa"
-else
-    echo "Scaffold files already exist, skipping scaffolding"
-    
-    # Copy final scaffold files to output directory if not already present
-    if [[ ! -f "$OUTPUT_DIR/scaffold_1.fa" ]]; then
-        cp "$TEMP_DIR/scaffold_1.fa" "$OUTPUT_DIR/scaffold_1.fa"
-    fi
-    if [[ ! -f "$OUTPUT_DIR/scaffold_2.fa" ]]; then
-        cp "$TEMP_DIR/scaffold_2.fa" "$OUTPUT_DIR/scaffold_2.fa"
-    fi
-fi
 
 echo "======================================================"
 echo "Hypo Assembler Completed"
 echo "Time: $(date +"%Y-%m-%d %T")"
 echo "Output Directory: $OUTPUT_DIR"
 echo "Final assembly files:"
-echo "  $OUTPUT_DIR/scaffold_1.fa"
-echo "  $OUTPUT_DIR/scaffold_2.fa"
+echo "  $OUTPUT_DIR/polished_1.fa"
+echo "  $OUTPUT_DIR/polished_2.fa"
 echo "======================================================"
