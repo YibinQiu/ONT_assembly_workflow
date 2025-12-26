@@ -1,5 +1,5 @@
 # ONT_assembly_workflow
-ONT genome assemble
+
 Softwere requirment: 
 0. samtools (https://github.com/samtools/samtools), minimap2 (https://github.com/lh3/minimap2)
 1. ratatosk (https://github.com/DecodeGenetics/Ratatosk) and nextflow (https://github.com/nextflow-io/nextflow);
